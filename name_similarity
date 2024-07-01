@@ -1,0 +1,80 @@
+from rapidfuzz.distance import Levenshtein
+from jellyfish import soundex
+from metaphone import doublemetaphone
+from fuzzywuzzy import fuzz
+from difflib import SequenceMatcher
+
+
+# Точне співпадіння
+def точне_співпадіння(name1, name2):
+    return name1 == name2
+
+
+# Співпадіння без урахування регістру
+def співпадіння_без_урахування_регістру(name1, name2):
+    return name1.lower() == name2.lower()
+
+
+# Відстань Левенштейна
+def співпадіння_левенштейна(name1, name2, threshold=1):
+    return Levenshtein.distance(name1, name2) <= threshold
+
+
+# Soundex
+def співпадіння_soundex(name1, name2):
+    return soundex(name1) == soundex(name2)
+
+
+# Metaphone
+def співпадіння_metaphone(name1, name2):
+    return doublemetaphone(name1)[0] == doublemetaphone(name2)[0]
+
+
+# Нечітке порівняння
+def нечітке_співпадіння(name1, name2, threshold=95):
+    return fuzz.token_set_ratio(name1, name2) >= threshold
+
+
+# Схожість N-грам
+def схожість_нграм(name1, name2, n=3):
+    def ngrams(string, n):
+        return [string[i:i + n] for i in range(len(string) - n + 1)]
+
+    ngrams1 = ngrams(name1, n)
+    ngrams2 = ngrams(name2, n)
+    intersection = len(set(ngrams1) & set(ngrams2))
+    union = len(set(ngrams1) | set(ngrams2))
+    return intersection / union
+
+
+def співпадіння_нграм(name1, name2, threshold=0.7):
+    return схожість_нграм(name1, name2) >= threshold
+
+
+# Функція для перевірки схожості імен
+def чи_імена_схожі(name1, name2):
+    if точне_співпадіння(name1, name2):
+        return True
+    if співпадіння_без_урахування_регістру(name1, name2):
+        return True
+    if (співпадіння_левенштейна(name1, name2) and
+            співпадіння_soundex(name1, name2) and
+            співпадіння_metaphone(name1, name2) and
+            нечітке_співпадіння(name1, name2) and
+            співпадіння_нграм(name1, name2)):
+        return True
+    return False
+
+
+def main():
+    name1 = input("Введіть перше ім'я: ")
+    name2 = input("Введіть друге ім'я: ")
+
+    if чи_імена_схожі(name1, name2):
+        print("Імена схожі.")
+    else:
+        print("Імена не схожі.")
+
+
+if __name__ == "__main__":
+    main()
