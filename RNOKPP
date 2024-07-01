@@ -1,0 +1,43 @@
+#AGE
+#SEX
+from datetime import datetime, timedelta
+
+
+def analyze_id(id_number):
+    if len(id_number) != 10 or not id_number.isdigit():
+        raise ValueError("ID number must be a 10-digit numeric string")
+
+    # Extract the date part (1-5 digits)
+    encoded_date = int(id_number[:5])
+
+    # Calculate the birth date (days since 31.12.1899)
+    base_date = datetime(1899, 12, 31)
+    birth_date = base_date + timedelta(days=encoded_date)
+
+    # Extract the serial number (6-9 digits)
+    serial_number = int(id_number[5:9])
+
+    # Determine the sex (9th digit)
+    sex_digit = int(id_number[8])
+    sex = "Female" if sex_digit % 2 == 0 else "Male"
+
+    # Calculate the age
+    today = datetime.today()
+    age = today.year - birth_date.year - ((today.month, today.day) < (birth_date.month, birth_date.day))
+
+    return {
+        "Birth Date": birth_date.strftime("%Y-%m-%d"),
+        "Age": age,
+        "Sex": sex
+    }
+
+
+if __name__ == "__main__":
+    id_number = input("Enter the 10-digit ID number: ")
+    try:
+        result = analyze_id(id_number)
+        print(f"Birth Date: {result['Birth Date']}")
+        print(f"Age: {result['Age']}")
+        print(f"Sex: {result['Sex']}")
+    except ValueError as e:
+        print(e)
