@@ -1,0 +1,205 @@
+import requests
+import base64
+import re
+import csv
+import time
+from concurrent.futures import ThreadPoolExecutor
+from cryptography import x509
+from cryptography.hazmat.primitives.serialization import pkcs7, pkcs12
+from cryptography.hazmat.backends import default_backend
+from cryptography.x509.oid import ObjectIdentifier
+from pyasn1.codec.der.decoder import decode
+from pyasn1.type import univ
+
+# Шлях до файлу з ID тендерів
+tender_ids_file = 'C:\\Temp\\Python 2\\.idea\\Пайтон Код\\2023-2024.csv'
+output_file = 'C:\\Temp\\Python 2\\.idea\\Пайтон Код\\processed_tenders.csv'
+base_tender_url = 'https://public-api.prozorro.gov.ua/api/2.5/tenders/'
+
+
+def parse_edrpou_string(input_string):
+    sequences = input_string.split('\n\n')
+    dicts = []
+    for sequence in sequences:
+        if sequence.strip():
+            current_dict = {}
+            lines = sequence.split('\n')
+            current_field = None
+            for line in lines:
+                if 'Sequence:' in line or 'SetOf:' in line:
+                    continue
+                match = re.match(r'\s*(field-\d+)=(.*)', line)
+                if match:
+                    current_field = match.group(1)
+                    current_dict[current_field] = match.group(2).strip()
+                elif current_field:
+                    current_dict[current_field] += ' ' + line.strip()
+            dicts.append(current_dict)
+    return dicts
+
+
+def decode_base64_if_needed(data):
+    try:
+        decoded_data = base64.b64decode(data)
+        return decoded_data
+    except base64.binascii.Error:
+        return data
+
+
+def extract_pkcs7_content(pkcs7_data):
+    try:
+        pkcs7_obj = pkcs7.load_der_pkcs7_certificates(pkcs7_data)
+        if pkcs7_obj:
+            for cert in pkcs7_obj:
+                subject = cert.subject
+                issuer = cert.issuer
+                serial_number = cert.serial_number
+                edrp_rnokpp_object_id = ObjectIdentifier('2.5.29.9')
+                edrp_rnokpp_extension = cert.extensions.get_extension_for_oid(edrp_rnokpp_object_id)
+                edrp_rnokpp_raw_value = edrp_rnokpp_extension.value.value
+                decoded_edrp_rnokpp, _ = decode(edrp_rnokpp_raw_value, asn1Spec=univ.Sequence())
+                parsed_edrp_rnokpp = parse_edrpou_string(str(decoded_edrp_rnokpp.prettyPrint()))
+                edrp_result = parsed_edrp_rnokpp[0]['field-0'].split()[-1]
+                rnokpp_result = parsed_edrp_rnokpp[1]['field-0'].split()[-1]
+
+                def get_attribute(name, oid):
+                    try:
+                        return name.get_attributes_for_oid(oid)[0].value
+                    except IndexError:
+                        return None
+
+                signer_info = {
+                    "РНОКПП": rnokpp_result,
+                    "Код ЄДРПОУ": edrp_result,
+                    "Посада": get_attribute(subject, x509.ObjectIdentifier("2.5.4.12")),
+                    "Організація": get_attribute(subject, x509.NameOID.ORGANIZATION_NAME),
+                    "Підписувач": get_attribute(subject, x509.NameOID.COMMON_NAME),
+                }
+
+                return signer_info
+        else:
+            print("Файл не містить дійсних даних PKCS#7.")
+            return None
+    except Exception as e:
+        print(f"Помилка при витяганні даних з PKCS#7: {e}")
+        return None
+
+
+def extract_pkcs12_content(pkcs12_data, password=None):
+    try:
+        private_key, cert, additional_certs = pkcs12.load_key_and_certificates(pkcs12_data, password, default_backend())
+        if cert:
+            subject = cert.subject
+            issuer = cert.issuer
+            serial_number = cert.serial_number
+
+            def get_attribute(name, oid):
+                try:
+                    return name.get_attributes_for_oid(oid)[0].value
+                except IndexError:
+                    return None
+
+            rnokpp_result = get_attribute(subject, x509.ObjectIdentifier("2.5.4.5"))
+            edrp_result = get_attribute(subject, x509.ObjectIdentifier("1.2.840.113549.1.9.1"))
+
+            signer_info = {
+                "РНОКПП": rnokpp_result,
+                "Код ЄДРПОУ": edrp_result,
+                "Посада": get_attribute(subject, x509.ObjectIdentifier("2.5.4.12")),
+                "Організація": get_attribute(subject, x509.NameOID.ORGANIZATION_NAME),
+                "Підписувач": get_attribute(subject, x509.NameOID.COMMON_NAME),
+            }
+
+            return signer_info
+        else:
+            print("Файл не містить дійсних даних PKCS#12.")
+            return None
+    except Exception as e:
+        print(f"Помилка при витяганні даних з PKCS#12: {e}")
+        return None
+
+
+def download_file(url):
+    response = requests.get(url)
+    if response.status_code == 200:
+        return response.content, response.headers.get('Content-Type')
+    else:
+        print(f"Не вдалося завантажити файл з {url}. Статус-код: {response.status_code}")
+        return None, None
+
+
+def process_tender(tender_id):
+    tender_url = f"{base_tender_url}{tender_id}"
+    response = requests.get(tender_url)
+    if response.status_code == 200:
+        tender_data = response.json()
+        result = {"tender_id": tender_id}
+
+        # Extract procuringEntity details
+        procuring_entity = tender_data.get('data', {}).get('procuringEntity', {})
+        result['procuringEntity_id'] = procuring_entity.get('identifier', {}).get('id')
+        result['procuringEntity_name'] = procuring_entity.get('identifier', {}).get('legalName')
+        result['procuringEntity_contact_name'] = procuring_entity.get('contactPoint', {}).get('name')
+
+        for doc in tender_data.get('data', {}).get('documents', []):
+            if doc.get('title_en') == 'sign.p7s':
+                signature_url = doc['url']
+                start_time = time.time()  # Start the timer
+                file_data, mime_type = download_file(signature_url)
+                if file_data:
+                    decoded_data = decode_base64_if_needed(file_data)
+                    signer_info = None
+                    if mime_type == 'application/pkcs7-signature':
+                        signer_info = extract_pkcs7_content(decoded_data)
+                    elif mime_type == 'application/x-pkcs12':
+                        signer_info = extract_pkcs12_content(decoded_data)
+                    else:
+                        print(f"Непідтримуваний MIME-тип: {mime_type}")
+
+                    end_time = time.time()  # End the timer
+                    print(f"Обробка підпису зайняла {end_time - start_time:.3f} секунд.")
+
+                    if signer_info:
+                        result.update(signer_info)
+                        print_combined_info(result)
+                        return result
+    return None
+
+def print_combined_info(result):
+    print("\nІнформація про закупівельну організацію:")
+    print(f"ID: {result['procuringEntity_id']}")
+    print(f"Name: {result['procuringEntity_contact_name']}")
+    print("\nІнформація про підписувача:")
+    print(f"РНОКПП: {result.get('РНОКПП')}")
+    print(f"Код ЄДРПОУ: {result.get('Код ЄДРПОУ')}")
+    print(f"Посада: {result.get('Посада')}")
+    print(f"Організація: {result.get('Організація')}")
+    print(f"Підписувач: {result.get('Підписувач')}")
+
+
+def main():
+    with open(tender_ids_file, 'r', encoding='utf-8') as file:
+        reader = csv.reader(file)
+        tender_ids = [row[0].split(';')[0] for row in reader][:1000]  # Limit to 1000 tenders
+
+    results = []
+    with ThreadPoolExecutor(max_workers=10) as executor:
+        futures = {executor.submit(process_tender, tender_id): tender_id for tender_id in tender_ids}
+        for future in futures:
+            result = future.result()
+            if result:
+                results.append(result)
+
+    # Save results to CSV
+    if results:
+        with open(output_file, 'w', newline='', encoding='utf-8') as csvfile:
+            fieldnames = ["tender_id", "procuringEntity_id", "procuringEntity_name", "procuringEntity_contact_name", "РНОКПП", "Код ЄДРПОУ", "Посада", "Організація", "Підписувач"]
+            writer = csv.DictWriter(csvfile, fieldnames=fieldnames)
+
+            writer.writeheader()
+            for row in results:
+                writer.writerow(row)
+
+
+if __name__ == "__main__":
+    main()
